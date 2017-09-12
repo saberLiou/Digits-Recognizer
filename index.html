@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Digits Recognizer</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="assets/logo.ico" rel="SHORTCUT ICON">
+    <link rel="stylesheet" href="css/jquery.mobile-1.0.1.min.css" />
+    <!-- HTML5 shim and Respond.js IE8 support of HTML5 elements and media queries -->
+    <!--[if lt IE 9]>
+      <script src="../../assets/js/html5shiv.js"></script>
+      <script src="../../assets/js/respond.min.js"></script>
+    <![endif]-->
+    <script src="http://code.jquery.com/jquery-1.6.4.min.js"></script>
+    <script src="http://code.jquery.com/mobile/1.0.1/jquery.mobile-1.0.1.min.js"></script>
+    <script src="js/W1.js"></script>
+    <script src="js/W2.js"></script>
+    <script src="js/W3.js"></script>
+    <script src="js/b1.js"></script>
+    <script src="js/b2.js"></script>
+    <script src="js/b3.js"></script>
+    <style>
+    *{
+      padding:0;
+      margin:0;
+      text-align: center;
+    }
+    </style>
+  </head>
+  <body data-theme="a" style="overflow:hidden !important;">
+    <div data-role="page">
+      <div data-role="header" data-theme="a">
+        <h1>來數幾類</h1>
+      </div><!-- /header -->
+
+      <div data-role="content">
+        <canvas id="can" width="280" height="280" style="border:2px solid;"></canvas>
+        <div id="nnOut" style="height:80px;font-size:80px;z-index:999;"></div>
+      </div><!-- /content -->
+
+      <div data-role="footer" data-theme="a" data-position="fixed">
+        <button onclick="erase()">Clear</button>
+        <button onclick="recognize()">Recognize</button>
+      </div><!-- /footer -->
+    </div>
+    <script type="text/javascript">
+      // some of the code below was taken from a stackoverflow flag I cannot find anymore, and adapted to my needs. Thanks a ton to the original author!
+      var canvas;
+      var ctx;
+
+      var prevX = 0;
+      var currX = 0;
+      var prevY = 0;
+      var currY = 0;
+      var paths = []; // recording paths
+      var paintFlag = false;
+      var color = "black";
+      var lineWidth = 20;
+          
+      var clearBeforeDraw = false;
+      // controls whether canvas will be cleared on next mousedown event. Set to true after digit recognition
+
+      //neural net with one hidden layer; sigmoid for hidden, softmax for output
+      function nn(data) {
+        var V1 = [];
+        for (var i = 0; i < W1.length; i++){
+          var cal = 0.0;
+          for (var j = 0; j < W1[i].length; j++){
+            cal += W1[i][j] * data[j];
+          }
+          cal += b1[i];
+          cal = (cal < 0) ? 0 : cal;
+          V1.push(cal);
+        }
+        
+        var V2 = [];
+        for (var i = 0; i < W2.length; i++){
+          var cal = 0.0;
+          for (var j = 0; j < W2[i].length; j++){
+            cal += W2[i][j] * V1[j];
+          }
+          cal += b2[i];
+          cal = (cal < 0) ? 0 : cal;
+          V2.push(cal);
+        }
+
+        var V3 = [];
+        for (var i = 0; i < W3.length; i++){
+          var cal = 0.0;
+          for (var j = 0; j < W3[i].length; j++){
+            cal += W3[i][j] * V2[j];
+          }
+          cal += b3[i];
+          V3.push(cal);
+        }
+        
+        return V3;
+      }
+
+      // computes center of mass of digit, for centering
+      // note 1 stands for black (0 white) so we have to invert.
+      function centerImage(img) {
+        var meanX = 0;
+        var meanY = 0;
+        var rows = img.length;
+        var columns = img[0].length;
+        var sumPixels = 0;
+        for (var y = 0; y < rows; y++) {
+          for (var x = 0; x < columns; x++) {
+            var pixel = (1 - img[y][x]);
+            sumPixels += pixel;
+            meanY += y * pixel;
+            meanX += x * pixel;
+          }
+        }
+        meanX /= sumPixels;
+        meanY /= sumPixels;
+        
+        var dY = Math.round(rows/2 - meanY);
+        var dX = Math.round(columns/2 - meanX);
+        return {transX: dX, transY: dY};
+      }
+
+      // given grayscale image, find bounding rectangle of digit defined
+      // by above-threshold surrounding
+      function getBoundingRectangle(img, threshold) {
+        var rows = img.length;
+        var columns = img[0].length;
+        var minX = columns;
+        var minY = rows;
+        var maxX = -1;
+        var maxY = -1;
+        for (var y = 0; y < rows; y++) {
+          for (var x = 0; x < columns; x++) {
+            if (img[y][x] < threshold) {
+              if (minX > x) minX = x;
+              if (maxX < x) maxX = x;
+              if (minY > y) minY = y;
+              if (maxY < y) maxY = y;
+            }
+          }
+        }
+        return {
+          minY: minY,
+          minX: minX,
+          maxY: maxY,
+          maxX: maxX
+        };
+      }
+
+      // take canvas image and convert to grayscale. Mainly because my
+      // own functions operate easier on grayscale, but some stuff like
+      // resizing and translating is better done with the canvas functions
+      function imageDataToGrayscale(imgData) {
+        var grayscaleImg = [];
+        for (var y = 0; y < imgData.height; y++) {
+          grayscaleImg[y]=[];
+          for (var x = 0; x < imgData.width; x++) {
+            var offset = y * 4 * imgData.width + 4 * x;
+            var alpha = imgData.data[offset+3];
+            // weird: when painting with stroke, alpha == 0 means white;
+            // alpha > 0 is a grayscale value; in that case I simply take the R value
+            if (alpha == 0) {
+              imgData.data[offset] = 255;
+              imgData.data[offset+1] = 255;
+              imgData.data[offset+2] = 255;
+            }
+            imgData.data[offset+3] = 255;
+            // simply take red channel value. Not correct, but works for
+            // black or white images.
+            grayscaleImg[y][x] = imgData.data[y * 4 * imgData.width + x * 4 + 0] / 255;
+          }
+        }
+        return grayscaleImg;
+      }
+
+      // takes the image in the canvas, centers & resizes it, then puts into 10x10 px bins
+      // to give a 28x28 grayscale image; then, computes class probability via neural network
+      function recognize() {
+        
+        // convert RGBA image to a grayscale array, then compute bounding rectangle and center of mass  
+        var imgData = ctx.getImageData(0, 0, 280, 280);
+        grayscaleImg = imageDataToGrayscale(imgData);
+        var boundingRectangle = getBoundingRectangle(grayscaleImg, 0.01);
+        var trans = centerImage(grayscaleImg); // [dX, dY] to center of mass
+        
+        // copy image to hidden canvas, translate to center-of-mass, then
+        // scale to fit into a 200x200 box.
+        var canvasCopy = document.createElement("canvas");
+        canvasCopy.width = imgData.width;
+        canvasCopy.height = imgData.height;
+        var copyCtx = canvasCopy.getContext("2d");
+        var brW = boundingRectangle.maxX + 1 - boundingRectangle.minX;
+        var brH = boundingRectangle.maxY + 1 - boundingRectangle.minY;
+        var scaling = 190 / (brW > brH ? brW : brH);
+        // scale
+        copyCtx.translate(canvas.width / 2, canvas.height / 2);
+        copyCtx.scale(scaling, scaling);
+        copyCtx.translate(-canvas.width / 2, -canvas.height / 2);
+        // translate to center of mass
+        copyCtx.translate(trans.transX, trans.transY);
+        copyCtx.drawImage(ctx.canvas, 0, 0);
+        
+        // now bin image into 10x10 blocks (giving a 28x28 image)
+        imgData = copyCtx.getImageData(0, 0, 280, 280);
+        grayscaleImg = imageDataToGrayscale(imgData);
+
+        // Check if the canvas is all white.
+        var wholeWhite = true;
+        for (var i in grayscaleImg){
+          for (var j in grayscaleImg[i]){
+            if (grayscaleImg[i][j] != 1){
+              wholeWhite = false;
+              break;
+            }
+          }
+        }
+        if (wholeWhite){
+          alert("Please draw something to recognize a digit.");
+          return;
+        }
+        else{
+          // Transpose the grayscaleImg to correct the data.
+          for (var i = 0; i < grayscaleImg.length; i++) {
+            for (var j = 0; j < i; j++) {
+              //swap element[i,j] and element[j,i]
+              var temp = grayscaleImg[i][j];
+              grayscaleImg[i][j] = grayscaleImg[j][i];
+              grayscaleImg[j][i] = temp;
+            }
+          }
+
+          var nnInput = new Array(784);
+          for (var y = 0; y < 28; y++) {
+            for (var x = 0; x < 28; x++) {
+              var mean = 0;
+              for (var v = 0; v < 10; v++) {
+                for (var h = 0; h < 10; h++) {
+                  mean += grayscaleImg[y*10 + v][x*10 + h];
+                }
+              }
+              mean = (1 - mean / 100); // average and invert
+              nnInput[x * 28 + y] = mean;
+            }
+          }
+          
+          var maxIndex = 0;
+          var nnOutput = nn(nnInput);
+          console.log(nnOutput);
+          nnOutput.reduce(function(p,c,i){
+            if (p < c){
+              maxIndex = i;
+              return c;
+            }
+            else {
+              return p;
+            }
+          });
+          console.log('maxIndex: ' + maxIndex);
+          document.getElementById('nnOut').innerHTML = maxIndex;
+          clearBeforeDraw = true;
+        }
+      }
+          
+      function init() {
+          canvas = document.getElementById('can');
+          ctx = canvas.getContext("2d");
+
+          canvas.addEventListener("mousemove", function (e) {
+              findxy('move', e)
+          }, false);
+          canvas.addEventListener("mousedown", function (e) {
+              findxy('down', e)
+          }, false);
+          canvas.addEventListener("mouseup", function (e) {
+              findxy('up', e)
+          }, false);
+          canvas.addEventListener("mouseout", function (e) {
+              findxy('out', e)
+          }, false);
+
+          canvas.addEventListener("touchmove", function (e) {
+              findxy('move', e)
+          }, false);
+          canvas.addEventListener("touchstart", function (e) {
+              findxy('down', e)
+          }, false);
+          canvas.addEventListener("touchend", function (e) {
+              findxy('up', e)
+          }, false);
+          canvas.addEventListener("touchend", function (e) {
+              findxy('out', e)
+          }, false);
+
+          document.body.addEventListener('touchmove', function (event) {
+              event.preventDefault();
+          }, false);
+      }
+
+      // draws a line from (x1, y1) to (x2, y2) with nice rounded caps
+      function draw(ctx, color, lineWidth, x1, y1, x2, y2) {
+          ctx.beginPath();
+          ctx.strokeStyle = color;
+          ctx.lineWidth = lineWidth;
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+          ctx.moveTo(x1, y1);
+          ctx.lineTo(x2, y2);
+          ctx.stroke();
+          ctx.closePath();
+      }
+
+      function erase() {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          document.getElementById('nnOut').innerHTML = '';
+      }
+
+      function findxy(res, e) {
+          if (res == 'down') {
+              if (clearBeforeDraw == true) {
+                ctx.clearRect(0,0,canvas.width,canvas.height);
+                document.getElementById('nnOut').innerHTML = '';
+                paths = [];
+                clearBeforeDraw = false;
+              }
+              
+              if (e.pageX != undefined && e.pageY != undefined) {
+                currX = e.pageX-canvas.offsetLeft;
+                currY = e.pageY-canvas.offsetTop;
+              } else {
+                currX = e.clientX + document.body.scrollLeft
+                        + document.documentElement.scrollLeft
+                        - canvas.offsetLeft;
+                currY = e.clientY + document.body.scrollTop
+                        + document.documentElement.scrollTop
+                        - canvas.offsetTop;
+              }
+
+              //draw a circle
+              ctx.beginPath();
+              ctx.lineWidth = 1;
+              ctx.arc(currX, currY, lineWidth / 2, 0, 2 * Math.PI);
+              ctx.stroke();
+              ctx.closePath();
+              ctx.fill();
+              
+              paths.push([[currX], [currY]]);
+              paintFlag = true;
+          }
+          if (res == 'up' || res == "out") {
+              paintFlag = false;
+              //console.log(paths);
+          }
+          
+          if (res == 'move') {
+              if (paintFlag) {
+                  // draw a line to previous point
+                  prevX = currX;
+                  prevY = currY;
+                  if (e.pageX != undefined && e.pageY != undefined) {
+                    currX = e.pageX-canvas.offsetLeft;
+                    currY = e.pageY-canvas.offsetTop;
+                  } else {
+                    currX = e.clientX + document.body.scrollLeft
+                            + document.documentElement.scrollLeft
+                            - canvas.offsetLeft;
+                    currY = e.clientY + document.body.scrollTop
+                            + document.documentElement.scrollTop
+                            - canvas.offsetTop;
+                  }
+                  currPath = paths[paths.length - 1];
+                  currPath[0].push(currX);
+                  currPath[1].push(currY);
+                  paths[paths.length - 1] = currPath;
+                  draw(ctx, color, lineWidth, prevX, prevY, currX, currY);
+              }
+          }
+      }
+      init();
+    </script>
+  </body>
+</html>
